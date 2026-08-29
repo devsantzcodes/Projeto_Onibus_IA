@@ -5,47 +5,58 @@ import time
 import threading
 
 # ==========================================
-# CARREGA O MODELO DE IA
+# CONFIGURAÇÕES
 # ==========================================
 
-model = YOLO("yolo11n.pt")
+# Modelo de IA
+MODEL_PATH = "yolo11n.pt"
 
-# ==========================================
-# CÂMERA DO REDMI ATRAVÉS DO TAILSCALE
-# ==========================================
+# Câmera do Redmi
+URL_CAMERA = "http://192.168.1.21:8080/video"
 
-URL_CAMERA = "http://192.168.1.33:8080/video"
-
-# ==========================================
-# API DO SITE
-# ==========================================
-
+# API do site
 API_URL = "https://project--bd20e6c8-95d5-4277-bf1f-ebe6b57911fd-dev.lovable.app/api/public/lotacao"
 
-# Envia os dados no máximo uma vez por segundo
-INTERVALO_ENVIO = 1.0
-ultimo_envio = 0
-
-# ==========================================
-# CAPACIDADE MÁXIMA
-# ==========================================
-
+# Capacidade máxima do ônibus
 CAPACIDADE_ONIBUS = 40
 
+
 # ==========================================
-# FUNÇÃO PARA ENVIAR DADOS PARA O SITE
+# DESEMPENHO
 # ==========================================
 
-def enviar_para_api(pessoas, capacidade, lotacao, status):
+# Quantidade de análises do YOLO por segundo
+FPS_YOLO = 5
 
-    dados = {
-        "pessoas": int(pessoas),
-        "capacidade": int(capacidade),
-        "lotacao": round(float(lotacao), 1),
-        "status": str(status)
-    }
+# 5 FPS = uma análise a cada 0,2 segundo
+INTERVALO_DETECCAO = 1.0 / FPS_YOLO
+
+# Envio para a API a cada 1 segundo
+INTERVALO_ENVIO = 1.0
+
+# Tamanho da imagem usada pelo YOLO
+TAMANHO_IMAGEM = 640
+
+
+# ==========================================
+# CARREGA O MODELO
+# ==========================================
+
+print("Carregando modelo YOLO...")
+
+model = YOLO(MODEL_PATH)
+
+print("Modelo carregado!")
+
+
+# ==========================================
+# ENVIO PARA API
+# ==========================================
+
+def enviar_para_api(dados):
 
     try:
+
         resposta = requests.post(
             API_URL,
             json=dados,
@@ -53,14 +64,19 @@ def enviar_para_api(pessoas, capacidade, lotacao, status):
         )
 
         if resposta.ok:
+
             print(f"Dados enviados: {dados}")
+
         else:
+
             print(
-                f"Erro da API: {resposta.status_code} "
-                f"- {resposta.text}"
+                f"Erro da API: "
+                f"{resposta.status_code} - "
+                f"{resposta.text}"
             )
 
     except requests.exceptions.RequestException as erro:
+
         print(f"Falha ao enviar dados para a API: {erro}")
 
 
@@ -68,15 +84,42 @@ def enviar_para_api(pessoas, capacidade, lotacao, status):
 # CONECTA À CÂMERA
 # ==========================================
 
+print("Conectando à câmera...")
+
 cap = cv2.VideoCapture(URL_CAMERA)
 
+# Tenta reduzir o buffer da câmera
+cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
 if not cap.isOpened():
+
     print("ERRO: não foi possível conectar à câmera.")
+
     exit()
+
 
 print("Câmera conectada!")
 print("API configurada!")
+print(f"YOLO configurado para {FPS_YOLO} FPS.")
 print("Pressione ESC para sair.")
+
+
+# ==========================================
+# VARIÁVEIS
+# ==========================================
+
+ultima_deteccao = 0
+ultimo_envio = 0
+
+pessoas = 0
+lotacao = 0.0
+
+status = "LIVRE"
+
+cor_status = (0, 255, 0)
+
+frame_processado = None
+
 
 # ==========================================
 # LOOP PRINCIPAL
@@ -84,100 +127,135 @@ print("Pressione ESC para sair.")
 
 while True:
 
-    # Recebe um frame da câmera
+    # --------------------------------------
+    # RECEBE FRAME DA CÂMERA
+    # --------------------------------------
+
     ret, frame = cap.read()
 
     if not ret:
+
         print("Não foi possível receber o vídeo.")
+
         break
 
-    # ==========================================
-    # IA DETECTA SOMENTE PESSOAS
-    # Classe 0 = pessoa
-    # ==========================================
 
-    results = model(
-        frame,
-        classes=[0],
-        verbose=False
-    )
+    agora = time.monotonic()
 
-    # Contador de pessoas
-    pessoas = 0
 
-    # ==========================================
-    # CONTA AS PESSOAS DETECTADAS
-    # ==========================================
+    # ======================================
+    # YOLO - 5 FPS
+    # ======================================
 
-    for result in results:
+    if agora - ultima_deteccao >= INTERVALO_DETECCAO:
 
-        for box in result.boxes:
+        ultima_deteccao = agora
 
-            # Como estamos detectando somente classe 0,
-            # cada box já representa uma pessoa.
-            pessoas += 1
+        # ----------------------------------
+        # DETECTA SOMENTE PESSOAS
+        # ----------------------------------
 
-    # ==========================================
-    # CALCULA A PORCENTAGEM DE LOTAÇÃO
-    # ==========================================
+        results = model(
+            frame,
+            classes=[0],
+            imgsz=TAMANHO_IMAGEM,
+            verbose=False
+        )
 
-    lotacao = (pessoas / CAPACIDADE_ONIBUS) * 100
 
-    # ==========================================
-    # DEFINE O STATUS
-    # ==========================================
+        # ----------------------------------
+        # CONTA PESSOAS
+        # ----------------------------------
 
-    if lotacao <= 50:
+        pessoas = 0
 
-        status = "LIVRE"
-        cor_status = (0, 255, 0)       # Verde
+        for result in results:
 
-    elif lotacao <= 80:
+            for box in result.boxes:
 
-        status = "MODERADO"
-        cor_status = (0, 255, 255)     # Amarelo
+                pessoas += 1
 
-    else:
 
-        status = "LOTADO"
-        cor_status = (0, 0, 255)       # Vermelho
+        # ----------------------------------
+        # CALCULA LOTAÇÃO
+        # ----------------------------------
 
-    # ==========================================
-    # ENVIA OS DADOS PARA O SITE
-    # ==========================================
+        lotacao = (
+            pessoas / CAPACIDADE_ONIBUS
+        ) * 100
 
-    agora = time.time()
 
-    if agora - ultimo_envio >= INTERVALO_ENVIO:
+        # ----------------------------------
+        # DEFINE STATUS
+        # ----------------------------------
 
-        ultimo_envio = agora
+        if lotacao <= 50:
 
-        # Usa uma thread para o envio não travar
-        # a captura e processamento do vídeo.
-        threading.Thread(
-            target=enviar_para_api,
-            args=(
-                pessoas,
-                CAPACIDADE_ONIBUS,
-                lotacao,
-                status
-            ),
-            daemon=True
-        ).start()
+            status = "LIVRE"
 
-    # ==========================================
-    # DESENHA SOMENTE AS PESSOAS DETECTADAS
-    # ==========================================
+            cor_status = (0, 255, 0)
 
-    frame = results[0].plot()
+        elif lotacao <= 80:
 
-    # ==========================================
+            status = "MODERADO"
+
+            cor_status = (0, 255, 255)
+
+        else:
+
+            status = "LOTADO"
+
+            cor_status = (0, 0, 255)
+
+
+        # ----------------------------------
+        # DESENHA DETECÇÕES
+        # ----------------------------------
+
+        frame_processado = results[0].plot()
+
+
+        # ==================================
+        # ENVIA DADOS PARA API
+        # ==================================
+
+        if agora - ultimo_envio >= INTERVALO_ENVIO:
+
+            ultimo_envio = agora
+
+            dados = {
+                "pessoas": int(pessoas),
+                "capacidade": int(CAPACIDADE_ONIBUS),
+                "lotacao": round(float(lotacao), 1),
+                "status": str(status)
+            }
+
+            # Envia em segundo plano para
+            # não travar o vídeo
+            threading.Thread(
+                target=enviar_para_api,
+                args=(dados,),
+                daemon=True
+            ).start()
+
+
+    # ======================================
+    # CASO AINDA NÃO TENHA DETECÇÃO
+    # ======================================
+
+    if frame_processado is None:
+
+        frame_processado = frame.copy()
+
+
+    # ======================================
     # INFORMAÇÕES NA TELA
-    # ==========================================
+    # ======================================
 
     # Pessoas
+
     cv2.putText(
-        frame,
+        frame_processado,
         f"Pessoas: {pessoas}/{CAPACIDADE_ONIBUS}",
         (20, 50),
         cv2.FONT_HERSHEY_SIMPLEX,
@@ -186,9 +264,11 @@ while True:
         2
     )
 
+
     # Lotação
+
     cv2.putText(
-        frame,
+        frame_processado,
         f"Lotacao: {lotacao:.1f}%".replace(".", ","),
         (20, 90),
         cv2.FONT_HERSHEY_SIMPLEX,
@@ -197,9 +277,11 @@ while True:
         2
     )
 
+
     # Status
+
     cv2.putText(
-        frame,
+        frame_processado,
         f"Status: {status}",
         (20, 130),
         cv2.FONT_HERSHEY_SIMPLEX,
@@ -208,25 +290,32 @@ while True:
         3
     )
 
-    # ==========================================
+
+    # ======================================
     # MOSTRA O VÍDEO
-    # ==========================================
+    # ======================================
 
     cv2.imshow(
         "IA - Lotacao do Onibus",
-        frame
+        frame_processado
     )
 
-    # ==========================================
+
+    # ======================================
     # ESC PARA SAIR
-    # ==========================================
+    # ======================================
 
     if cv2.waitKey(1) & 0xFF == 27:
+
         break
 
+
 # ==========================================
-# ENCERRA A CÂMERA E FECHA AS JANELAS
+# ENCERRAMENTO
 # ==========================================
 
 cap.release()
+
 cv2.destroyAllWindows()
+
+print("Sistema encerrado.")
